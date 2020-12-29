@@ -13,7 +13,10 @@ from airflow.operators.bash_operator import BashOperator
 from airflow.operators.dummy_operator import DummyOperator
 from airflow.operators.python_operator import PythonOperator
 from airflow.utils.dates import days_ago
+import airflow.hooks.S3_hook
+import boto3
 
+s3 = boto3.resource('s3')
 
 config = configparser.ConfigParser()
 config.read(f"{os.path.expanduser('~')}/airflow/api.config")
@@ -64,6 +67,9 @@ def get_clean_data(**context):
     video_df.to_csv(f"{os.path.expanduser('~')}/airflow/data/video.csv", index=None)
     author_df.to_csv(f"{os.path.expanduser('~')}/airflow/data/author.csv", index=None)
 
+def upload_file_to_S3_with_hook(filename, key, bucket_name):
+    hook = airflow.hooks.S3_hook.S3Hook('aws_default')
+    hook.load_file(filename, key, bucket_name)
 
 
 default_args = {
@@ -77,12 +83,12 @@ default_args = {
 }
 
 
-
+ 
 with DAG(
     'tiktok_dag',
     default_args=default_args,
     description='Our first DAG',
-    schedule_interval="@daily",
+    schedule_interval="*/2 * * * *",
 ) as dag:
     get_data = PythonOperator(
         task_id='get_data',
@@ -94,6 +100,25 @@ with DAG(
         python_callable=get_clean_data,
         dag=dag,
         provide_context=True
-)
+) 
+    
+    s3_tasks = []
 
-get_data >> clean_data
+    for file in [f"{os.path.expanduser('~')}/airflow/data/author.csv", 
+                 f"{os.path.expanduser('~')}/airflow/data/video.csv"]:
+        upload_to_S3_task = PythonOperator(
+                                            task_id=f'upload_to_S3_{file.split("/")[-1]}',
+                                            python_callable=upload_file_to_S3_with_hook,
+                                            op_kwargs={
+                                                'filename': file,
+                                                'key': f'{datetime.now().strftime("%Y-%b-%d/%H-%M")}-{file.split("/")[-1]}',
+                                                'bucket_name': f'tiktok-fun',
+                                            },
+                                            dag=dag)
+
+        s3_tasks.append(upload_to_S3_task)
+        
+    opr_end = BashOperator(task_id='opr_end', bash_command='echo "Done"')
+        
+
+get_data >> clean_data >> s3_tasks >> opr_end
